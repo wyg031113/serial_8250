@@ -19,7 +19,10 @@
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/semaphore.h>
+#include <linux/kfifo.h>
 
+#define RECV_FIFO_SIZE (1024*1024)
+#define SEND_FIFO_SIZE (1024*16)
 #define debug(fmt, ...) printk(KERN_DEBUG fmt, ##__VA_ARGS__)
 #define info(fmt, ...) printk(KERN_INFO fmt, ##__VA_ARGS__)
 #define DEV_NAME "serial"
@@ -80,13 +83,18 @@ struct serial_device
 	int minor;
 	int speed;
 	atomic_t atmc_open;
-	spinlock_t splock;
+	spinlock_t splock_rfifo;
+	spinlock_t splock_wfifo;
 	unsigned word_len:2;
 	unsigned stop_bit:1;
 	unsigned parity:3;
 	struct task_struct *tsk;
 	int stop;
 	struct semaphore sem_read;
+	struct kfifo *recv_fifo;
+	struct kfifo *send_fifo;
+	struct tasklet_struct recv_tasklet;
+	struct tasklet_struct send_tasklet;
 };
 static struct serial_device sdev[2] = 
 {
@@ -190,8 +198,11 @@ static void  init_serial(struct serial_device *ser_dev)
 		printk("reg%d: %x\n", i, inb(ser_dev->base + i));
 	}
 }
+
+
 char tmp_buf[1024*1024];
 int cnt = 0;
+
 static int serial_read_thread(void *data)
 {
 
@@ -221,19 +232,54 @@ static int serial_read_thread(void *data)
 	}
 	return 0;
 }
+static void recv_tasklet_func(unsigned long data)
+{
+	#define BUF_SIZE 256
+	char buf[BUF_SIZE];
+	int len = 0;
+	int ret = 0;
+	struct serial_device *ser_dev = (struct serial_device*)data;
+	while(len < BUF_SIZE && HAVE_DEV(ser_dev) && CAN_READ(ser_dev)){
+			buf[len++] =  READB(ser_dev);
+		}
+	ret = kfifo_put(ser_dev->recv_fifo, buf, len);
+	if(ret < len){
+		debug("recv fifo fulled.\n");
+		disable_recv_intr(ser_dev);
+	}
+}
+static void send_tasklet_func(unsigned long data)
+{
+	#define BUF_SIZE 256
+	char buf[FIFO_SIZE];
+	int len = 0;
+	struct serial_device *ser_dev = (struct serial_device*)data;
+	len = kfifo_get(ser_dev->send_fifo, buf, FIFO_SIZE);
+	if(len == 0){
+		disable_send_intr(ser_dev);
+		return;
+	}
+	while(len < FIFO_SIZE && HAVE_DEV(ser_dev)){
+		WRITEB(ser_dev, buf[len++]);
+	}
+}
+
 static irqreturn_t serial_irq_handler(int irq, void *dev_id)
 {
 	struct serial_device *ser_dev = (struct serial_device*)dev_id;
 	if(INT_RECV(ser_dev)){
-		up(&ser_dev->sem_read);
+		tasklet_schedule(&ser_dev->recv_tasklet);
+	}
+	if(INT_SEND(ser_dev)){
+		tasklet_schedule(&ser_dev->send_tasklet);
 	}
 	return IRQ_HANDLED;
 }
 static int serial_open(struct inode *ind, struct file *flp)
 {
 	int ret;
-	cnt = 0;
 	struct serial_device *ser_dev = &sdev[MINOR(ind->i_rdev)];
+	cnt = 0;
 	if(!atomic_dec_and_test(&ser_dev->atmc_open)){
 		atomic_inc(&ser_dev->atmc_open);
 		return -EBUSY;
@@ -250,16 +296,21 @@ static int serial_open(struct inode *ind, struct file *flp)
 		goto failed1;
 	}
 
-	ser_dev->stop = 0;
-	ser_dev->tsk = kthread_run(serial_read_thread, ser_dev, "serial read");
-	if(ser_dev->tsk == NULL){
-		debug("kthread run failed.\n");
-		ret = -ENOMEM;
+	ser_dev->recv_fifo = kfifo_alloc(RECV_FIFO_SIZE, GFP_KERNEL, &ser_dev->splock_rfifo);
+	if(IS_ERR(ser_dev->recv_fifo)){
+		debug("kfifo alloc recv fifo failed.\n");
 		goto failed2;
 	}
-	printk("ser_dev:%p\n", ser_dev);
+
+	ser_dev->send_fifo = kfifo_alloc(SEND_FIFO_SIZE, GFP_KERNEL, &ser_dev->splock_wfifo);
+	if(IS_ERR(ser_dev->send_fifo)){
+		debug("kfifo alloc send fifo failed.\n");
+		goto failed3;
+	}
 	enable_recv_intr(ser_dev);
 	return 0;
+failed3:
+	kfifo_free(ser_dev->recv_fifo);
 failed2:
 	free_irq(ser_dev->irq, ser_dev);
 failed1:
@@ -272,13 +323,10 @@ static int serial_release(struct inode *ind, struct file *flp)
 	DISABLE_FIFO(ser_dev);
 	disable_send_intr(ser_dev);
 	disable_recv_intr(ser_dev);
+	kfifo_free(ser_dev->recv_fifo);
+	kfifo_free(ser_dev->send_fifo);
 	free_irq(ser_dev->irq, ser_dev);
-	ser_dev->stop = 1;
-	kthread_stop(ser_dev->tsk);
 	atomic_inc(&ser_dev->atmc_open);
-	tmp_buf[cnt] = 0;
-	printk("%s\n", tmp_buf);
-	printk("recv %d bytes\n", cnt);
 	return 0;
 }
 static struct file_operations serial_fops = 
@@ -322,7 +370,10 @@ static int __init serial_init(void)
 	}
 	
 	for(i = 0; i < DEV_NUM; i++){
-		spin_lock_init(&sdev[i].splock);
+		spin_lock_init(&sdev[i].splock_rfifo);
+		spin_lock_init(&sdev[i].splock_wfifo);
+		tasklet_init(&sdev[i].recv_tasklet, recv_tasklet_func, (unsigned long)&sdev[i]);
+		tasklet_init(&sdev[i].send_tasklet, send_tasklet_func, (unsigned long)&sdev[i]);
 		request_region(sdev[i].base, DEV_REG_NUM, sdev[i].name);
 		sema_init(&sdev[i].sem_read, 0);
 		sdev[i].dvs = device_create(serial_class, NULL, devno+sdev[i].minor, &dev, sdev[i].name);
