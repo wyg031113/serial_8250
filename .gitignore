@@ -1,7 +1,11 @@
 *.o
 *.ko
 *.mod.c
-.*.tmp_versions
+.tmp_versions
 *.unsigned
 *.order
+*.cmd
+tags
 app
+send
+data.txt
