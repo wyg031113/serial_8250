@@ -27,11 +27,16 @@ int main(int argc, char *argv[])
 	time_t start = time(NULL);
 	while(1){
 		len = read(fd, buf, 4096);
-		int ret = 0;
-		//int ret = write(STDOUT_FILENO, buf, len);
-		//if(len != ret)
-		//	break;
 		total += len;
+		int ret = 0;
+		int tlen = len;
+		printf("read %d bytes\n", len);
+		while(len > 0){
+			ret = write(fd, buf+(tlen-len), len);
+			if(ret < 0)
+				break;
+			len -= ret;
+		}
 		time_t pst = time(NULL) - start;
 		printf("read %d bytes\nwrite %d bytes\ntotal:%lld\n speed:%lld bytes/s\n", len, ret, total, total/(long long)pst);
 	}

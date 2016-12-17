@@ -290,7 +290,7 @@ static int serial_open(struct inode *ind, struct file *flp)
 		goto failed3;
 	}
 
-	ser_dev->recv_ts = kthread_run(serial_recv_thread, ser_dev, "%s_send", ser_dev->name);
+	ser_dev->recv_ts = kthread_run(serial_recv_thread, ser_dev, "%s_recv", ser_dev->name);
 	if(IS_ERR(ser_dev->recv_ts)){
 		ser_dev->recv_ts = NULL;
 		debug("kthread run recv failed.\n");
