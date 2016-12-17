@@ -113,8 +113,8 @@ static struct serial_device sdev[2] =
 	[1]			=
 				{
 					.name		=	DEV_NAME"1",
-					.base		=	0x3e8,
-					.irq		=	5,
+					.base		=	0x3f8,
+					.irq		=	4,
 					.atmc_open	=	ATOMIC_INIT(1),
 					.speed		=	DEFUALT_SPEED,
 					.word_len	=	WORD_LEN_8,
