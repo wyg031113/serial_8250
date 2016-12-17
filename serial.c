@@ -246,6 +246,11 @@ static irqreturn_t serial_irq_handler(int irq, void *dev_id)
 {
 	struct serial_device *ser_dev = (struct serial_device*)dev_id;
 	unsigned char iir = GET_IIR(ser_dev);
+	if(!HAVE_DEV(ser_dev)){
+		disable_recv_intr(ser_dev);
+		disable_send_intr(ser_dev);
+		return IRQ_HANDLED;
+	}
 	if(INT_RECV(iir)){
 //		debug("recv int.\n");
 		tasklet_schedule(&ser_dev->recv_tasklet);
